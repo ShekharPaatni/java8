@@ -1,0 +1,191 @@
+ protected List<VirtualInventoryVirtualCredits> updateAllVirtualCreditsAndCreateOrderReductionEvents
+ (List<VirtualInventoryDrugEvents> viDrugEventList, Double quantityReduced, List<VirtualInventoryEvents> events,
+ VirtualInventoryPhysicalCredits pcCredit, Boolean isCreditMemo) {
+
+        List<VirtualInventoryDrugEvents> viDrugEventsOrders =
+        viDrugEventList.stream().filter(c -> ORDER_EVENT.equalsIgnoreCase(c.getVirtualInventoryEvents().getCode())).collect(Collectors.toList());
+        List<VirtualInventoryDrugEvents> viDrugEventsOverage =
+        viDrugEventList.stream().filter(c -> OVERAGE_EVENT.equalsIgnoreCase(c.getVirtualInventoryEvents().getCode())).collect(Collectors.toList());
+
+
+        VirtualInventoryEvents eventApproval = events.stream().filter(c->APPROVED_EVENT.equalsIgnoreCase(c.getCode())).findAny().orElse(null);
+        VirtualInventoryEvents eventOrderReduction = events.stream().filter(c->ORDER_REDUCTION_EVENT.equalsIgnoreCase(c.getCode())).findAny().orElse(null);
+        VirtualInventoryEvents eventOverageReduction = events.stream().filter(c->OVERAGE_REDUCTION_EVENT.equalsIgnoreCase(c.getCode())).findAny().orElse(null);
+
+        List<VirtualInventoryVirtualCredits> viCreditList = viDrugEventsOrders.stream().map(VirtualInventoryDrugEvents::getVirtualInventoryVirtualCredits).filter(c->!c.getReversed()).collect(Collectors.toList());
+        List<VirtualInventoryDrugEvents> approvalEventsList = getAllByVirtualCreditListAndEventType(viCreditList, eventApproval);
+
+        //List of the viCredits that have been affected by the order reduction events.
+        List<VirtualInventoryVirtualCredits> viCreditsReduced = new ArrayList<>();
+
+        List<VirtualInventoryDrugEvents> viOrderOverageReductionEventsList = new ArrayList<>();
+        List<VirtualInventoryOverages> viOverageList = new ArrayList<>();
+
+        //Makes a copy of the Virtual Credit List, will remove virtual Credits as they are Under Replenished.
+        List<VirtualInventoryVirtualCredits> unitsInvoicedVirtualCredits = new ArrayList<>(viCreditList);
+
+        //Repository save list of the virtual Credits.
+        List<VirtualInventoryVirtualCredits> finalViCreditsList = new ArrayList<>();
+
+        try {
+            for(VirtualInventoryDrugEvents viOverageEvent: viDrugEventsOverage){
+                if(quantityReduced >= 0){
+                    break;
+                }
+                Double overageReductionAmt;
+                //Clears out overages first before returning Inventory.
+
+                //Fetch Associated Overage Amount from Drug Event
+                VirtualInventoryOverages viOverage = viOverageEvent.getVirtualInventoryOverages();
+
+                Double reduceOverage;
+
+                //Checks to see if the quantity being returned is greater/less than the remaining inventory, and places accordingly.
+                if(Math.abs(quantityReduced) >= Math.abs(viOverageEvent.getQuantity())) {
+                    reduceOverage = 0.0;
+                    overageReductionAmt = Math.abs(viOverage.getOverageUnits());
+                    quantityReduced = quantityReduced + overageReductionAmt;
+                }
+                else{
+                    reduceOverage = quantityReduced;
+                    overageReductionAmt = Math.abs(reduceOverage);
+                    quantityReduced = 0.0;
+                }
+
+                viOverage.setOverageUnits(reduceOverage);
+                viOverageList.add(viOverage);
+
+
+                VirtualInventoryDrugEvents viOverageReduction = new VirtualInventoryDrugEvents();
+                viOverageReduction.setVirtualInventoryDrugs(viOverageEvent.getVirtualInventoryDrugs());
+                viOverageReduction.setIsCalculated(false);
+                viOverageReduction.setEventDate(DateTime.now(DateTimeZone.UTC));
+                viOverageReduction.setNdc(viOverageEvent.getNdc());
+                viOverageReduction.setQuantity(overageReductionAmt);
+                viOverageReduction.setVirtualInventoryEvents(eventOverageReduction);
+                viOverageReduction.setVirtualInventoryOverages(viOverage);
+                viOverageReduction.setVirtualInventoryPhysicalCredits(pcCredit);
+                viOrderOverageReductionEventsList.add(viOverageReduction);
+            }
+
+
+            for (VirtualInventoryDrugEvents viDrugEvent : viDrugEventsOrders) {
+
+                    if (quantityReduced >= 0) {
+                    break;
+                }
+
+                //Returning Virtual Inventory Back to Virtual Credits Table.
+                VirtualInventoryVirtualCredits viCredit = viDrugEvent.getVirtualInventoryVirtualCredits();
+
+                Double vcQuantity;
+                Double returnedQuantityEvent;
+
+                //Checks to see if the quantity being returned is greater/less than the remaining inventory, and places accordingly.
+                if(Math.abs(quantityReduced)>=Math.abs(viDrugEvent.getQuantity())) {
+                    returnedQuantityEvent = Math.abs(viDrugEvent.getQuantity());
+                    vcQuantity = viCredit.getUnitsAvailable() + returnedQuantityEvent;
+                    quantityReduced = 0-(Math.abs(quantityReduced) - returnedQuantityEvent);
+                }
+                else{
+                    returnedQuantityEvent = Math.abs(quantityReduced);
+                    vcQuantity = viCredit.getUnitsAvailable() + returnedQuantityEvent;
+                    quantityReduced = 0.0;
+                }
+
+                viCredit.setUnitsAvailable(vcQuantity);
+
+                //Check to see if all of the quantity has been put back for this approval event, and if so set IsOrderFlag to False.
+                Double originalQuanity = approvalEventsList.stream().filter(c -> viCredit.getId().equals(c.getVirtualInventoryVirtualCredits().getId())).map(VirtualInventoryDrugEvents::getQuantity).findAny().orElse(null);
+                if(null == originalQuanity){
+                    log.error(String.format("Original Quantity was found to be null for Drug Events Id: %s",viDrugEvent.getId()));
+                    continue;
+                }
+
+                if (vcQuantity.equals(originalQuanity)) {
+                    viCredit.setOrderFlag(false);
+                }
+
+
+                //Setting units available in the case of a
+
+
+                if(isCreditMemo) {
+                    viCredit.setUnitsInvoiced(viCredit.getUnitsInvoiced() - returnedQuantityEvent);
+                }
+                else {
+                    if (returnedQuantityEvent != Math.abs(viDrugEvent.getQuantity())) {
+                        if (null == viCredit.getUnitsInvoiced()) {
+                            viCredit.setUnitsInvoiced(0.0);
+                        }
+                        Double unitInvoiced = Math.abs(viDrugEvent.getQuantity()) - returnedQuantityEvent;
+                        viCredit.setUnitsInvoiced(viCredit.getUnitsInvoiced() + unitInvoiced);
+                    }
+                }
+
+                //Adds the Modified Virtual Credit to the list.
+                viCreditsReduced.add(viCredit);
+
+                //Removes the affected Virtual Credit from the list.
+                unitsInvoicedVirtualCredits.remove(viCredit);
+
+
+                //Creating Order Reduction Events.
+                VirtualInventoryDrugEvents viOrderReductionEvent = new VirtualInventoryDrugEvents();
+                viOrderReductionEvent.setVirtualInventoryVirtualCredits(viCredit);
+                viOrderReductionEvent.setVirtualInventoryDrugs(viDrugEvent.getVirtualInventoryDrugs());
+                viOrderReductionEvent.setIsCalculated(false);
+                viOrderReductionEvent.setEventDate(DateTime.now(DateTimeZone.UTC));
+                viOrderReductionEvent.setNdc(viDrugEvent.getNdc());
+                viOrderReductionEvent.setQuantity(returnedQuantityEvent);
+                viOrderReductionEvent.setVirtualInventoryEvents(eventOrderReduction);
+                viOrderReductionEvent.setVirtualInventoryPhysicalCredits(pcCredit);
+                viOrderOverageReductionEventsList.add(viOrderReductionEvent);
+            }
+
+
+
+
+
+            if(null == unitsInvoicedVirtualCredits || unitsInvoicedVirtualCredits.isEmpty()) {
+                //Updates the units invoiced
+                unitsInvoicedVirtualCredits = updateUnitsInvoiced(unitsInvoicedVirtualCredits, viDrugEventsOrders, isCreditMemo);
+                finalViCreditsList.addAll(unitsInvoicedVirtualCredits);
+            }
+
+            finalViCreditsList.addAll(viCreditsReduced);
+
+
+            if(!viOverageList.isEmpty()) {
+                try {
+                    virtualInventoryOveragesRepository.save(viOverageList);
+                    log.info(String.format("Successfully Reduced Overage for ndcID: %s", viOverageList.get(0).getVirtualInventoryDrugs().getId()));
+                } catch (Exception e) {
+                    log.error(String.format("An exception occurred while trying to update Virtual Inventory Overage Event for NdcId: %s", viDrugEventList.get(0).getVirtualInventoryDrugs().getId()), e);
+                    return finalViCreditsList;
+                }
+            }
+            if(!finalViCreditsList.isEmpty()) {
+                try {
+                    virtualInventoryVirtualCreditsRepository.save(finalViCreditsList);
+                    log.info(String.format("Successfully Updated Virtual Credit for ndcID: %s", finalViCreditsList.get(0).getVirtualInventoryDrugs().getId()));
+                } catch (Exception e) {
+                    log.error(String.format("An exception occurred while trying to update Virtual Credit Events for NdcId: %s", viDrugEventList.get(0).getVirtualInventoryDrugs().getId()), e);
+                    return finalViCreditsList;
+                }
+            }
+            if(!viOrderOverageReductionEventsList.isEmpty()) {
+                try {
+                    virtualInventoryDrugEventsRepository.save(viOrderOverageReductionEventsList);
+                    log.info(String.format("Successfully created Order Reduction Event for ndcID: %s", viOrderOverageReductionEventsList.get(0).getVirtualInventoryDrugs().getId()));
+                } catch (Exception e) {
+                    log.error(String.format("An exception occurred while creating Order Reduction Events for NdcId: %s", viDrugEventList.get(0).getVirtualInventoryDrugs().getId()), e);
+                    return finalViCreditsList;
+                }
+            }
+        }catch (Exception e){
+            log.error("An exception occurred while trying to process return of Virtual Inventory Credits",e);
+            return finalViCreditsList;
+        }
+        return finalViCreditsList;
+    }
